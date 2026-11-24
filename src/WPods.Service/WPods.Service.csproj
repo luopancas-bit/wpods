@@ -10,6 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="WPods.RepairTests" />
     <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.0" />
     <Content Include="$(NuGetPackageRoot)system.serviceprocess.servicecontroller\10.0.0\THIRD-PARTY-NOTICES.TXT" Link="dotnet-THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

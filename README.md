@@ -30,6 +30,12 @@
   <a href="#support-wpods"><b>Support</b></a>
 </p>
 
+## Fork repair status
+
+This fork includes a source fix for Windows USB/IP cancellation dropping bytes from the shared Bluetooth HCI/ACL stream. It includes regression tests and a manual audio-endpoint recovery tool.
+
+See [修复记录、设备与版本兼容性 / repair notes and tested compatibility](docs/REPAIRS.zh-CN.md). Playback endpoint enumeration after reconnect remains a known issue; this change does not claim to resolve every disconnect or missing-output problem. The upstream download links below do not include this fork's source changes.
+
 ## Preview
 
 <p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/home-top-dark.png"><img src="docs/screenshots/home-top-light.png" width="360" alt="WPods home screen"></picture></p>
