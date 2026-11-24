@@ -14,6 +14,7 @@ internal sealed class RadioLink : IDisposable
     private readonly NetworkStream _stream;
     private readonly WinUsbDevice _device;
     private readonly HciProxy _hci;
+    private readonly Action<nint, byte> _abortPipe;
     private readonly Lock _write = new();
     private readonly ConcurrentDictionary<byte, BlockingCollection<Urb>> _queues = new();
     private readonly ConcurrentDictionary<uint, Urb> _live = new();
@@ -45,12 +46,13 @@ internal sealed class RadioLink : IDisposable
     private readonly List<Thread> _workers = [];
     private int _lost;
 
-    public RadioLink(TcpClient client, WinUsbDevice device, HciProxy hci)
+    public RadioLink(TcpClient client, WinUsbDevice device, HciProxy hci, Action<nint, byte>? abortPipe = null)
     {
         _client = client;
         _stream = client.GetStream();
         _device = device;
         _hci = hci;
+        _abortPipe = abortPipe ?? WinUsbDevice.Abort;
         (_eventPipe, _aclIn, _aclOut) = FindHciPipes(device.ConfigDescriptor);
         Log.Info("radio", $"HCI pipes: events 0x{_eventPipe:X2}, ACL in 0x{_aclIn:X2}, ACL out 0x{_aclOut:X2}");
     }
@@ -241,10 +243,14 @@ internal sealed class RadioLink : IDisposable
                     return;
                 }
                 u.Cancelled = true;
-                // Only while this transfer runs (Completed is set before the pipe's next one starts).
-                if (u.Running && u.Pipe != 0 && _device.TryGetPipeInterface(u.Pipe, out nint iface))
+                // Windows owns the request, not the shared HCI stream. Aborting an event/ACL read can consume a
+                // partial packet and return ERROR_OPERATION_ABORTED, losing bytes before the parser sees them.
+                // Let ReadIn route the next physical read, then observe Cancelled and leave its bytes queued for
+                // Windows' next request. Stop() still aborts the physical pipes when the whole link is disposed.
+                if (u.Running && u.Pipe != 0 && u.Pipe != _eventPipe && u.Pipe != _aclIn
+                    && _device.TryGetPipeInterface(u.Pipe, out nint iface))
                 {
-                    WinUsbDevice.Abort(iface, u.Pipe);
+                    _abortPipe(iface, u.Pipe);
                 }
                 Send(UsbIp.RetUnlinkFrame(seq, UsbIp.ECONNRESET));
             }
