@@ -86,6 +86,8 @@ internal sealed partial class HciProxy
         {
             a.Seid = (byte)(data[2] >> 2);
         }
+        if (signal == AvdtpOpen && data.Length >= 3)
+            a.OpenRequested = true;
         switch (signal)
         {
             case AvdtpStart:
@@ -140,31 +142,49 @@ internal sealed partial class HciProxy
     /// <summary>Inbound L2CAP signaling for Windows (start of the PDU): the AirPods' side of AVDTP channels.</summary>
     private void NoteInboundSignalingLocked(Link link, ReadOnlySpan<byte> sig)
     {
-        if (sig.Length < 8)
+        while (sig.Length >= 4)
         {
-            return;
-        }
-        byte code = sig[0];
-        byte id = sig[1];
-        ReadOnlySpan<byte> d = sig[4..];
-        if (code == 0x03 && link.AvdtpRequests.Remove(id, out ushort local))
-        {
-            // Connection Response to Windows' request: DCID is the AirPods' end (result checked by use).
-            AddAvdtpChannel(link, local, BinaryPrimitives.ReadUInt16LittleEndian(d));
-        }
-        else if (code == 0x02 && BinaryPrimitives.ReadUInt16LittleEndian(d) == AvdtpPsm)
-        {
-            link.AvdtpIncoming.Add(BinaryPrimitives.ReadUInt16LittleEndian(d[2..]));
-        }
-        else
-        {
-            NoteInboundRfcommLocked(link, code, id, d);
+            byte code = sig[0];
+            byte id = sig[1];
+            int length = BinaryPrimitives.ReadUInt16LittleEndian(sig[2..]);
+            if (length > sig.Length - 4)
+                return;
+
+            var data = sig.Slice(4, length);
+            sig = sig[(4 + length)..];
+            if (code == 0x03 && data.Length >= 8 &&
+                link.AvdtpRequests.TryGetValue(id, out ushort local) &&
+                local == BinaryPrimitives.ReadUInt16LittleEndian(data[2..]))
+            {
+                ushort result = BinaryPrimitives.ReadUInt16LittleEndian(data[4..]);
+                if (result == 1) // Pending: the final response uses the same identifier.
+                    continue;
+
+                link.AvdtpRequests.Remove(id);
+                if (result == 0)
+                    AddAvdtpChannel(link, local, BinaryPrimitives.ReadUInt16LittleEndian(data));
+            }
+            else if (code == 0x02 && data.Length >= 4 && BinaryPrimitives.ReadUInt16LittleEndian(data) == AvdtpPsm)
+            {
+                link.AvdtpIncoming.Add(BinaryPrimitives.ReadUInt16LittleEndian(data[2..]));
+            }
+            else if (data.Length >= 4)
+            {
+                NoteInboundRfcommLocked(link, code, id, data);
+            }
         }
     }
 
     private static void AddAvdtpChannel(Link link, ushort local, ushort remote)
     {
-        if (link.Avdtp is not { } a || a.MediaRemote != 0)
+        // A retransmitted connection response must not consume the next channel slot.
+        if (link.Avdtp is { } existing &&
+            ((existing.SignalLocal == local && existing.SignalRemote == remote) ||
+             existing.MediaRemote == remote))
+        {
+            return;
+        }
+        if (link.Avdtp is not { OpenRequested: true } a || a.MediaRemote != 0)
         {
             // A new signaling channel starts a new stream session.
             link.Avdtp = new AvdtpState { SignalLocal = local, SignalRemote = remote };
@@ -297,6 +317,7 @@ internal sealed partial class HciProxy
         public ushort SignalLocal;
         public ushort SignalRemote;
         public ushort MediaRemote;
+        public bool OpenRequested;
         /// <summary>ACP SEID of the stream (the AirPods' sink endpoint).</summary>
         public byte Seid;
         /// <summary>The AirPods stream (Windows' START went through, or ours was accepted).</summary>

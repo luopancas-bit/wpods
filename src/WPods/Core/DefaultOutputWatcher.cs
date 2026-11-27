@@ -215,7 +215,12 @@ public sealed partial class DefaultOutputWatcher : IDisposable
     [GeneratedComClass]
     private sealed partial class NotificationClient(DefaultOutputWatcher owner) : IMMNotificationClient
     {
-        public int OnDeviceStateChanged(nint deviceId, uint newState) => 0;
+        public int OnDeviceStateChanged(nint deviceId, uint newState)
+        {
+            if (newState is (1 or 8) && Marshal.PtrToStringUni(deviceId)?.StartsWith("{0.0.0.", StringComparison.Ordinal) == true)
+                owner._connections.OnRenderEndpointChanged();
+            return 0;
+        }
 
         public int OnDeviceAdded(nint deviceId) => 0;
 

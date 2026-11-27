@@ -18,10 +18,16 @@ internal static unsafe class HandsFree
         }
         try
         {
-            if (TryIsEnabled(radio, device, out bool current, out _) && current == enabled)
+            if (!TryIsEnabled(radio, device, out bool current, out uint stateError))
+            {
+                throw new Win32Exception(unchecked((int)stateError),
+                    "Windows could not read the Hands-Free service state. No profile change was requested.");
+            }
+            if (current == enabled)
             {
                 return;
             }
+            Log.Info("conn", $"hands-free profile change requested: enabled={enabled}");
             changing?.Invoke();
             uint result = Native.BluetoothSetServiceState(radio, device, Service, enabled ? 1u : 0u);
             // Windows may report the already-applied state as E_INVALIDARG, or race the state query and return

@@ -41,4 +41,19 @@ foreach ((byte pipe, bool running, int expectedAborts) in new (byte, bool, int)[
     Console.WriteLine($"{(pass ? "PASS" : "FAIL")} cancel pipe=0x{pipe:X2} running={running}: aborts={aborts}, expected={expectedAborts}, cancellation acknowledged={request.Cancelled}");
     if (!pass) failures++;
 }
+{
+    var proxy = new HciProxy();
+    var type = typeof(HciProxy).GetNestedType("Link", BindingFlags.NonPublic)!;
+    var link = Activator.CreateInstance(type, [1, 0UL, false])!;
+    var requests = (Dictionary<byte, ushort>)type.GetField("AvdtpRequests")!.GetValue(link)!;
+    var note = typeof(HciProxy).GetMethod("NoteInboundSignalingLocked", BindingFlags.NonPublic | BindingFlags.Instance)!;
+    // ReadOnlySpan cannot be passed through reflection; exercise the channel registration seam directly.
+    var add = typeof(HciProxy).GetMethod("AddAvdtpChannel", BindingFlags.NonPublic | BindingFlags.Static)!;
+    add.Invoke(null, [link, (ushort)0x40, (ushort)0x60]);
+    add.Invoke(null, [link, (ushort)0x40, (ushort)0x60]);
+    var state = type.GetField("Avdtp")!.GetValue(link)!;
+    bool duplicateSafe = (ushort)state.GetType().GetField("MediaRemote")!.GetValue(state)! == 0;
+    Console.WriteLine($"{(duplicateSafe ? "PASS" : "FAIL")} duplicate signaling response does not become media channel");
+    if (!duplicateSafe) failures++;
+}
 return failures == 0 ? 0 : 1;

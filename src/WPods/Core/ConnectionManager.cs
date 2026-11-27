@@ -727,8 +727,9 @@ public sealed class ConnectionManager : IAsyncDisposable
         SetIdle(address, IdleReason.None, "attached");
         Attached?.Invoke(session);
         session.Start();
+        _ = ConfigureAudioAfterAttachAsync(session);
         _ = WatchAsync(session);
-        _ = ApplyHandsFreeOnAttachAsync(address);
+
         DevicesChanged?.Invoke();
         return true;
     }
@@ -831,7 +832,115 @@ public sealed class ConnectionManager : IAsyncDisposable
         }
     }
 
-    // Attaches another pair whose link is already up (last-used first), skipping held-back pairs. Never pages.
+    private async Task ConfigureAudioAfterAttachAsync(AapSession session)
+    {
+        // Applying the per-device hands-free preference can re-enumerate audio endpoints.
+        await ApplyHandsFreeOnAttachAsync(session.Address).ConfigureAwait(false);
+        if (ReferenceEquals(Session, session))
+            await RepairPlaybackAfterAttachAsync(session).ConfigureAwait(false);
+    }
+
+    private AapSession? _playbackRepairSession;
+
+    internal void OnRenderEndpointChanged()
+    {
+        if (Session is { } session)
+            _ = RepairPlaybackAfterAttachAsync(session);
+    }
+
+    private async Task RepairPlaybackAfterAttachAsync(AapSession session)
+    {
+        if (Interlocked.CompareExchange(ref _playbackRepairSession, session, null) is not null)
+            return;
+
+        try
+        {
+            long started = Environment.TickCount64;
+            long deadline = started + 60_000;
+            int unpluggedChecks = 0;
+            bool retried = false;
+            string lastState = "Unknown";
+            while (Environment.TickCount64 < deadline)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(4)).ConfigureAwait(false);
+                if (!ReferenceEquals(Session, session) || !_link.IsUp(session.Address) ||
+                    GetIdle(session.Address) != IdleReason.None) return;
+                var start = new System.Diagnostics.ProcessStartInfo(
+                    Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe"))
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                foreach (string arg in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                    "-File", Path.Combine(AppContext.BaseDirectory, "Repair-BluetoothEndpointNames.ps1"),
+                    "-BluetoothAddress", session.Address.ToString("X12"), "-OnAttach", "-Apply" })
+                    start.ArgumentList.Add(arg);
+                using var process = System.Diagnostics.Process.Start(start);
+                if (process == null) return;
+                var output = process.StandardOutput.ReadToEndAsync();
+                var errors = process.StandardError.ReadToEndAsync();
+                try
+                {
+                    await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+                }
+                catch (TimeoutException)
+                {
+                    try { process.Kill(entireProcessTree: true); }
+                    catch (InvalidOperationException) { }
+                    await process.WaitForExitAsync().ConfigureAwait(false);
+                    Log.Warn("conn", "Playback endpoint repair exceeded 15 seconds");
+                    return;
+                }
+                if (!ReferenceEquals(Session, session) || !_link.IsUp(session.Address) ||
+                    GetIdle(session.Address) != IdleReason.None) return;
+                string errorText = await errors.ConfigureAwait(false);
+                if (process.ExitCode != 0)
+                    Log.Warn("conn", $"Playback endpoint repair exited {process.ExitCode}: {errorText}");
+                string report = (await output.ConfigureAwait(false)).Trim();
+                Log.Info("conn", $"Playback endpoint check: exit={process.ExitCode} report={report}");
+                if (process.ExitCode != 0 || report.Length == 0) { unpluggedChecks = 0; continue; }
+                using var status = System.Text.Json.JsonDocument.Parse(report);
+                if (status.RootElement.GetProperty("Ready").GetBoolean())
+                    return;
+
+                var endpoints = status.RootElement.GetProperty("Observed").EnumerateArray().ToArray();
+                var states = endpoints.Select(e => e.GetProperty("State").GetInt32()).ToArray();
+                lastState = states.Contains(1) ? "ActiveNotReady"
+                    : states.Contains(2) ? "Disabled"
+                    : states.Contains(8) ? "Unplugged"
+                    : "Missing";
+                if (lastState == "Disabled")
+                {
+                    Log.Info("conn", "Playback endpoint is disabled; keeping Windows audio preference");
+                    return;
+                }
+                bool unplugged = lastState == "Unplugged";
+                unpluggedChecks = unplugged ? unpluggedChecks + 1 : 0;
+                if (!retried && unpluggedChecks >= 3 && Environment.TickCount64 - started >= 30_000 &&
+                    ReferenceEquals(Session, session) && _link.IsUp(session.Address) &&
+                    GetIdle(session.Address) == IdleReason.None)
+                {
+                    retried = true;
+                    int hr = global::WPods.Nearby.NearbyNative.wpn_bt_connect_audio(session.Address);
+                    Log.Info("conn", $"Delayed playback reconnect returned 0x{hr:X8}");
+                }
+            }
+            Log.Warn("conn", $"Playback recovery timed out: state={lastState}, requestedReconnect={retried}");
+        }
+        catch (Exception ex)
+        {
+            Log.Info("conn", $"Playback endpoint repair: {ex.Message}");
+        }
+        finally
+        {
+            Interlocked.CompareExchange(ref _playbackRepairSession, null, session);
+            if (Session is { } current && !ReferenceEquals(current, session))
+                _ = RepairPlaybackAfterAttachAsync(current);
+        }
+    }
+
     private void AttachOtherUpLocked(ulong excluded)
     {
         if (_session is not null || _disposed)

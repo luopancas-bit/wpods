@@ -45,7 +45,9 @@ internal sealed partial class HciProxy
     private readonly byte[] _event = new byte[257];
     private int _eventHave;
     private readonly ByteQueue _eventsOut = new();
-    private readonly byte[] _aclHead = new byte[16];
+    // HCI ACL header (4) + L2CAP header (4) + signaling command header (4)
+    // + Connection Response body (8). Keep the full response for channel tracking.
+    private readonly byte[] _aclHead = new byte[20];
     private int _aclHeadHave;
     private Route _aclRoute;
     private int _aclRemaining;
@@ -1285,10 +1287,7 @@ internal sealed partial class HciProxy
                 }
                 else
                 {
-                    if (command.Length >= 8)
-                    {
-                        NoteInboundRfcommLocked(link, command[0], command[1], command[4..]);
-                    }
+                    NoteInboundSignalingLocked(link, command);
                     windows.AddRange(command);
                 }
                 at = end;
